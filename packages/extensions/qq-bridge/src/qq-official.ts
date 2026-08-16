@@ -253,8 +253,12 @@ export class QqOfficialSource implements MessageSource {
       try {
         const url = await this.gatewayUrl()
         await this.connect(url)
+        // `connect()` resolves when the socket CLOSES (or creation failed):
+        // loop around to reconnect unless the transport was stopped. Without
+        // this, one drop (network blip, gateway maintenance, token expiry)
+        // left the bot offline until a full DSH restart.
         this.reconnectAttempts = 0
-        return
+        if (this.stopped) return
       } catch (error) {
         if (this.stopped) return
         this.reconnectAttempts++

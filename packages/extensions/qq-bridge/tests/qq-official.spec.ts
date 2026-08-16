@@ -178,6 +178,21 @@ describe('QqOfficialSource', () => {
     expect(received[0]).toMatchObject({ userId: 'OPENID_1', text: '你好', messageId: 'ROBOT1.0_msg1' })
   })
 
+  it('reconnects automatically after the socket closes', async () => {
+    const source = new QqOfficialSource(CREDENTIALS, 50)
+    const statuses: string[] = []
+    source.onStatus?.(status => { statuses.push(status.state) })
+    const ws = await connectReady(source)
+    const firstCount = FakeWebSocket.instances.length
+    expect(statuses).toContain('open')
+
+    // Dropping the socket must not leave the bot offline: the connect loop
+    // loops around and opens a fresh connection.
+    ws.close()
+    await vi.waitFor(() => expect(FakeWebSocket.instances.length).toBeGreaterThan(firstCount))
+    expect(statuses).toContain('closed')
+  })
+
   it('sends private messages via REST with QQBot auth and incrementing msg_seq', async () => {
     const sent: { url: string; auth: string | null; body: Record<string, unknown> }[] = []
     stubFetch(async (url, init) => {
