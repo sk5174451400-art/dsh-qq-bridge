@@ -193,6 +193,23 @@ describe('QqOfficialSource', () => {
     expect(statuses).toContain('closed')
   })
 
+  it('resumes the previous session (op 6) after a reconnect instead of re-identifying', async () => {
+    const source = new QqOfficialSource(CREDENTIALS, 50)
+    const ws = await connectReady(source)
+    const firstCount = FakeWebSocket.instances.length
+
+    ws.close()
+    await vi.waitFor(() => expect(FakeWebSocket.instances.length).toBeGreaterThan(firstCount))
+    const ws2 = FakeWebSocket.instances[firstCount]!
+    ws2.emit({ op: 10, d: { heartbeat_interval: 45000 } })
+    await vi.waitFor(() => expect(ws2.sent.length).toBeGreaterThan(0))
+
+    const resume = JSON.parse(ws2.sent[0]!) as { op: number; d: { session_id?: string; seq?: number | null } }
+    expect(resume.op).toBe(6)
+    expect(resume.d.session_id).toBe('sid')
+    expect(resume.d.seq).not.toBeNull()
+  })
+
   it('sends private messages via REST with QQBot auth and incrementing msg_seq', async () => {
     const sent: { url: string; auth: string | null; body: Record<string, unknown> }[] = []
     stubFetch(async (url, init) => {

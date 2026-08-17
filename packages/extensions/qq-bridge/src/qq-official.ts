@@ -143,6 +143,8 @@ export class QqOfficialSource implements MessageSource {
   private reconnectAttempts = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
   private lastSeq: number | null = null
+  /** Gateway session id from READY; used to Resume (op 6) after a reconnect. */
+  private sessionId: string | undefined
   private readonly handlers = new Set<(message: SourceMessage) => void | Promise<void>>()
   private readonly statusHandlers = new Set<(status: SourceStatus) => void>()
   private currentStatus: SourceStatus = { state: 'closed', detail: 'not started' }
@@ -293,8 +295,13 @@ export class QqOfficialSource implements MessageSource {
         this.clearHeartbeat()
         this.openedAt = undefined
         this.setState({ state: 'closed', detail: `closed code=${event.code}${event.reason ? ` reason=${event.reason}` : ''}` })
+        // 4006/4007: the stored session is invalid — drop it so the next
+        // connection identifies fresh instead of resuming a dead session.
+        if (event.code === 4006 || event.code === 4007) {
+          this.sessionId = undefined
+        }
         if (!this.stopped) {
-          // 4009: resume is preferred; 4914/4915 are terminal (sandbox/ban).
+          // 4009: reconnect and Resume (preferred). 4914/4915 are terminal (sandbox/ban).
           if (event.code === 4914 || event.code === 4915) {
             this.stopped = true
             this.setState({ state: 'closed', detail: `terminal close ${event.code}${event.reason ? `: ${event.reason}` : ''}` })
@@ -318,7 +325,13 @@ export class QqOfficialSource implements MessageSource {
       const d = payload['d']
       const interval = isRecord(d) && typeof d['heartbeat_interval'] === 'number' ? d['heartbeat_interval'] : 30_000
       this.startHeartbeat(interval)
-      void this.identify()
+      // After a reconnect, resume the previous session (op 6) so the gateway
+      // backfills missed events; a fresh session only identifies (op 2).
+      if (this.sessionId !== undefined) {
+        this.resume()
+      } else {
+        void this.identify()
+      }
       return
     }
     if (op === Op.HeartbeatAck) return
@@ -328,6 +341,7 @@ export class QqOfficialSource implements MessageSource {
       const type = payload['t']
       const d = payload['d']
       if (type === 'READY' && isRecord(d)) {
+        this.sessionId = typeof d['session_id'] === 'string' ? d['session_id'] : undefined
         this.openedAt = Date.now()
         const user = isRecord(d['user']) ? d['user'] : undefined
         this.botName = user && typeof user['username'] === 'string' ? user['username'] : undefined
@@ -374,6 +388,25 @@ export class QqOfficialSource implements MessageSource {
         intents: INTENT_C2C,
         shard: [0, 1],
         properties: { $os: 'node', $browser: 'dsh-qq-bridge', $device: 'dsh-qq-bridge' },
+      },
+    }))
+  }
+
+  /**
+   * Resume the previous gateway session (op 6) after a reconnect, per the
+   * official protocol: the gateway backfills events after `seq`. Requires the
+   * READY session id; a rejected resume (close 4006/4007) clears the id and
+   * the next connection identifies fresh.
+   */
+  private async resume(): Promise<void> {
+    const accessToken = await this.ensureToken().catch(() => undefined)
+    if (!accessToken || this.sessionId === undefined || this.ws?.readyState !== WebSocket.OPEN) return
+    this.ws.send(JSON.stringify({
+      op: Op.Resume,
+      d: {
+        token: `QQBot ${accessToken}`,
+        session_id: this.sessionId,
+        seq: this.lastSeq,
       },
     }))
   }
